@@ -1,0 +1,6 @@
+# Install the PyTorch CUDA build compatible with your NVIDIA driver first.
+torch>=2.2,<3
+diffusers>=0.30,<1
+numpy>=1.26,<3
+Pillow>=10,<14
+matplotlib>=3.8,<4

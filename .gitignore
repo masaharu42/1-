@@ -1,0 +1,13 @@
+# Raw research data, configuration containing labels, model weights and run output stay private.
+data/
+runs/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+*.zip
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.DS_Store
