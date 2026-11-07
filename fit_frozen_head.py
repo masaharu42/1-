@@ -22,6 +22,10 @@ def main():
  out=Path(a.output);out.mkdir(parents=True,exist_ok=True)
  if (out/'metrics.csv').exists():raise FileExistsError('Output already has metrics; select a new output directory')
  ds=AlloyDataset(a.manifest,sp['train'],256,a.windows,'train',a.seed,train_flip=a.train_flip,train_rotate=a.train_rotate);vds=AlloyDataset(a.manifest,sp['val'],256,a.eval_windows,'eval',a.seed);dl=DataLoader(ds,batch_size=a.batch_size,shuffle=True,num_workers=0);vl=DataLoader(vds,batch_size=1,shuffle=False,num_workers=0)
+ data_root=Path(a.manifest).resolve().parent
+ for rec in ds.records+vds.records:
+  path=(data_root/rec['image']).resolve()
+  if not path.is_relative_to(data_root) or hashlib.sha256(path.read_bytes()).hexdigest()!=rec.get('sha256'):raise ValueError(f'Dataset image integrity check failed for ID {rec["alloy_id"]}')
  vae=build_vae().to(dev);vae.load_state_dict(ck['vae']);vae.eval().requires_grad_(False);head=CompositionHead().to(dev);opt=torch.optim.AdamW(head.parameters(),lr=a.lr);std=np.std(ds.compositions,axis=0);mask=torch.tensor(std>1e-6,device=dev);scale=torch.tensor(np.maximum(std,.1),device=dev);start=time.monotonic()
  def calc(batch,training=False):
   images=batch['images'].to(dev);target=batch['composition'].to(dev);B,K=images.shape[:2];flat=images.reshape(B*K,*images.shape[2:])

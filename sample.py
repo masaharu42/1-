@@ -23,6 +23,8 @@ def run():
  if ck.get('vae_sha256')!=actual_hash:raise ValueError('VAE checkpoint does not match the one used in diffusion training')
  size=int(ck['config']['patch_size']);vae=build_vae().to(device).eval();vae.load_state_dict(vc['vae']);unet=make_unet(size,int(ck['config']['base_channels'])).to(device).eval();unet.load_state_dict(ck['unet']);sched=DDIMScheduler(num_train_timesteps=int(ck['config']['timesteps']),beta_schedule='squaredcos_cap_v2',prediction_type='epsilon',clip_sample=False);sched.set_timesteps(args.sample_steps,device=device)
  out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
+ if any(out.iterdir()):raise FileExistsError(f'{out} is not empty; choose a new --output to preserve previous samples')
+ if args.count<1 or not 1<=args.sample_steps<=int(ck['config']['timesteps']):raise ValueError('count must be positive and sample steps must fit the training schedule')
  with torch.no_grad():
   if args.reference:
    img=Image.open(args.reference).convert('RGB');w,h=img.size

@@ -69,13 +69,13 @@ python -u train_vae.py --manifest data/manifest.json --split data/split.json --o
 先完成 A，再冻结 A 的编码器训练成分头；然后与 B 比较：
 
 ```bash
-python -u fit_frozen_head.py --vae-checkpoint runs/vae_A/checkpoint_0005000.pt --output runs/head_A --device cuda --steps 1000 --train-flip --train-rotate --corruption-prob 0.2
+python -u fit_frozen_head.py --vae-checkpoint runs/vae_A/checkpoint_0005000.pt --output runs/head_A --device cuda --steps 1000 --eval-windows 16 --train-flip --train-rotate --corruption-prob 0.2
 python evaluate_vae.py --checkpoint runs/head_A/frozen_head.pt --partition val --output runs/eval_A_val --device cuda
 python evaluate_vae.py --checkpoint runs/vae_B/checkpoint_0005000.pt --partition val --output runs/eval_B_val --device cuda
 python plot_metrics.py runs/vae_B/metrics.csv --output runs/vae_B/plots
 ```
 
-先用验证集合决定检查点与配置。预先固定最终方案后，把上述 `--partition val` 换成 `--partition test` 并使用新输出路径；每个元素生成一张记录值—预测值图和 CSV。单折仅一个测试 ID，图上只有一个点；完整结论应通过多个严格合金留出折汇总，不能把该单点当成整体精度。训练期被冻结的模型和成分头使用同一折对应的训练、验证、测试列表；检查点与数据清单哈希不一致会中止。
+先用验证集合决定检查点与配置。预先固定最终方案后，把上述 `--partition val` 换成 `--partition test` 并使用新输出路径；每个元素生成一张记录值—预测值图和 CSV，并生成首个固定窗口的原图、重建图及差异对照。普通 VAE 无成分头时仅输出重建图。成分恒定的训练列在 CSV 中由 active_in_training 标记；即使 softmax 对该列产生非零数值，也不能理解为模型识别了该元素。单折仅一个测试 ID，图上只有一个点；完整结论应通过多个严格合金留出折汇总，不能把该单点当成整体精度。训练期被冻结的模型和成分头使用同一折对应的训练、验证、测试列表；检查点与数据清单哈希不一致会中止。
 
 ## 图像空间扩散细化（实验性）
 

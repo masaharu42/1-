@@ -44,6 +44,8 @@ def run():
  if args.device.startswith('cuda') and not torch.cuda.is_available():raise RuntimeError('CUDA requested but unavailable; use --device cpu for smoke tests')
  device=torch.device(args.device);amp=args.amp if device.type=='cuda' else 'no';dtype=torch.bfloat16 if amp=='bf16' else torch.float16
  split=load_split(args.split);ck=torch.load(args.vae_checkpoint,map_location='cpu',weights_only=False);validate_splits(ck,split)
+ manifest_sha256=hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
+ if ck['config'].get('manifest_sha256')!=manifest_sha256:raise ValueError('VAE checkpoint dataset manifest SHA256 does not match diffusion dataset; cannot validate data provenance')
  vae=build_vae().to(device);vae.load_state_dict(ck['vae']);vae.eval().requires_grad_(False)
  train=AlloyDataset(args.manifest,split['train'],patch_size=args.patch_size,windows_per_alloy=args.windows_per_alloy,mode='train',seed=args.seed)
  val=AlloyDataset(args.manifest,split['val'],patch_size=args.patch_size,windows_per_alloy=args.eval_windows,mode='eval',seed=args.seed)
