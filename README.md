@@ -106,3 +106,31 @@ python sample.py --vae-checkpoint runs/vae_B/checkpoint_0005000.pt \
 - 断点续训需原始 run 目录和可信检查点；使用终端 `python -u ...` 实时输出，也可 `2>&1 | tee train.log` 记录终端信息。
 - 本地 CPU 单步与恢复检查仅检查代码链路；服务器 CUDA 版本、显存、吞吐及训练质量尚需实际检查。
 - 性能模型、优化搜索与强化学习暂未实现，等用户提供完整曲线并核实指标定义后再设计。峰值应力可作为潜在抗拉强度指标，但需核对试验和曲线定义；曲线终点应变不可直接称断后延伸率。
+
+## 后续：探索性性能代理与候选筛选
+
+压缩包中的曲线是与 Ncorr 帧对齐的记录，未证明覆盖完整试验机最大载荷；一些曲线早期段存在回退或错位问题、部分峰值出现在最后一个保留帧。首轮建议只把整理后表格的 `ncorr_observed_peak_mpa_median` 视作“**已观测曲线峰值应力的合金级中位数**”探索目标，绝不能自动认定为已确认的抗拉强度；不使用屈服强度、断后伸长率，直到原始试验记录核查。候选标签表包含 `n_peak_at_last`、`peak_status` 等标记，需人工审核。**性能训练脚本不自动排除或修正标记条目**；若做敏感性分析，可显式用 `--exclude-train-ids 1,10,15,20` 从性能代理拟合中排除这些训练 ID（必须确实属于该折训练集），并与全部纳入的结果比较。此开关不移除这些 ID 的 VAE 训练图，也不会自动排除其他标记试次；若要严格排除这些图像，需调整划分并重训 VAE。验证/测试中的疑问样本须单独标注，不能用排除参数掩盖。
+
+另行传输私有力学数据包并解压后，下面是预先固定的单折探索：
+
+```bash
+python extract_performance_features.py --checkpoint runs/vae_B/checkpoint_0005000.pt \
+  --manifest data/manifest.json --split data/split.json \
+  --windows 16 --batch-windows 4 --device cuda --output runs/perf/features.json
+
+python fit_performance.py --features runs/perf/features.json \
+  --targets 'data/mechanics/分析输出/合金级候选标签_含质量标记.csv' \
+  --target-column ncorr_observed_peak_mpa_median --split data/split.json \
+  --alpha 10 --output runs/perf/peak_val
+```
+
+模型比较训练均值、图像潜变量、记录成分、图像+记录成分；后两者在测试时使用已知的**记录成分**，属于“已知成分”对照，并不代表仅凭未知生成图片就能直接使用。默认只输出验证 ID 的图和表；确定方法之后才用新输出路径显式增加 `--evaluate-test`。默认一折只有一个验证/测试合金，不能作为总体精度，必须逐合金严格留出并汇总；性能输入标签及模型结果不得视为实测最优。
+
+`rank_candidates.py` 对外部提供的候选预测表做简单双目标 Pareto 筛选，产生一张散点图和候选表；它不是 NSGA-II、强化学习、成分搜索或材料验证。使用前需要独立准备具有 `candidate_id` 及两列模型预测的 CSV，例如：
+
+```bash
+python rank_candidates.py --candidates /path/to/candidate_predictions.csv \
+  --objective-x predicted_peak --objective-y predicted_plasticity --output runs/candidate_review
+```
+
+如果塑性指标没有明确确认，不应把曲线终点命名为断后延伸率或作为可靠塑性目标。真正的目标驱动候选生成、NSGA-II/贝叶斯搜索、奖励设计和强化学习未实现，必须在性能标签和评分模型可信后继续研发。
