@@ -1,6 +1,8 @@
 # Euler+GB 组织与成分：服务器训练项目
 
-本项目从零训练 VAE，比较普通 VAE 与成分监督 VAE，并训练以 VAE 粗图为条件的图像空间扩散模型。输入为 256×256 的原始 Euler+GB 窗口。最终目标是图像→成分；性能搜索和强化学习留待性能标签核实及前阶段验证后实现。本版本是可审核的首轮 pilot，不包含性能模型、潜空间搜索或 RL。
+本项目从零训练 VAE，比较普通 VAE 与成分监督 VAE，并训练以 VAE 粗图为条件的图像空间扩散模型。输入为 256×256 的原始 Euler+GB 窗口。最终目标是图像→成分；性能搜索和强化学习留待性能标签核实及前阶段验证后实现。本版本为可审核的首轮 pilot，另含探索性性能代理；尚不包含完整的性能驱动潜空间搜索或 RL。
+
+折 19 的具体运行顺序、九元素回归比较及中文结果路径见 [折19服务器操作与结果说明](折19服务器操作与结果说明.md)。
 
 ## 数据与划分
 
@@ -13,12 +15,12 @@ data/manifest.json             # 图像、成分标签与图像 SHA-256
  data/compositions_source.csv   # 原成分表副本
 ```
 
-数据包包含 ID01–22；ID22 的标签为标准范围中点，不是已确认的实测值。**默认示例划分**：测试 ID18、验证 ID14、其余 20 个用于训练（包括 ID22）。这只是待审核的单折示例，不是全面验证；相同窗口不能跨分组。更改划分前请备份原 split，并重新从零训练该折全部模型。不要用测试结果选择参数。对各元素中的缺失/常零成分，模型输出不能视为有识别能力。
+数据包包含 ID01–22；ID22 的标签为标准范围中点，不是已确认的实测值。**默认示例划分**：测试 ID19、验证 ID14、其余 20 个用于训练（包括 ID22）。这只是待审核的单折示例，不是全面验证；相同窗口不能跨分组。更改划分前请备份原 split，并重新从零训练该折全部模型。不要用测试结果选择参数。对各元素中的缺失/常零成分，模型输出不能视为有识别能力。
 
 可在提供源图片和成分 CSV 时重新准备（会生成 split 和数据副本）：
 
 ```bash
-python prepare_data.py --images-dir /path/to/Euler_GB --compositions /path/to/compositions.csv --output data --val-ids 14 --test-ids 18
+python prepare_data.py --images-dir /path/to/Euler_GB --compositions /path/to/compositions.csv --output data --val-ids 14 --test-ids 19
 ```
 
 已有数据目录默认拒绝覆盖；请用不同输出目录或确认后使用 `--overwrite`。
@@ -94,7 +96,7 @@ python -u train_diffusion.py --manifest data/manifest.json --split data/split.js
 
 ```bash
 python sample.py --vae-checkpoint runs/vae_B/checkpoint_0005000.pt \
-  --diffusion-checkpoint runs/diff_B/best.pt --reference data/images/18.bmp \
+  --diffusion-checkpoint runs/diff_B/best.pt --reference data/images/19.bmp \
   --output runs/refine_demo --sample-steps 50 --count 4 --device cuda
 ```
 
@@ -105,7 +107,7 @@ python sample.py --vae-checkpoint runs/vae_B/checkpoint_0005000.pt \
 - 新训练任务独立输出，不覆盖旧实验；`.gitignore` 排除数据、权重和 runs。
 - 断点续训需原始 run 目录和可信检查点；使用终端 `python -u ...` 实时输出，也可 `2>&1 | tee train.log` 记录终端信息。
 - 本地 CPU 单步与恢复检查仅检查代码链路；服务器 CUDA 版本、显存、吞吐及训练质量尚需实际检查。
-- 性能模型、优化搜索与强化学习暂未实现，等用户提供完整曲线并核实指标定义后再设计。峰值应力可作为潜在抗拉强度指标，但需核对试验和曲线定义；曲线终点应变不可直接称断后延伸率。
+- 已有探索性性能代理和候选筛选脚本，完整性能驱动优化搜索与强化学习尚未实现。峰值应力需核对试验和曲线定义；曲线终点应变不可直接称断后延伸率。
 
 ## 后续：探索性性能代理与候选筛选
 

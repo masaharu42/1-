@@ -33,7 +33,7 @@ def main():
    recon=vae.decode(z[:,0]).sample.float().clamp(-1,1);original=im[0,0].float().cpu();reconstructed=recon[0].cpu()
    fig,axes=plt.subplots(1,3,figsize=(10,4));images=[(original+1)/2,(reconstructed+1)/2,(original-reconstructed).abs()/2]
    for ax,image,title in zip(axes,images,['Original','VAE reconstruction','Absolute RGB difference']):ax.imshow(image.permute(1,2,0).numpy().clip(0,1));ax.set_title(title);ax.axis('off')
-   fig.suptitle(f'ID {int(batch["alloy_id"][0])}: first fixed evaluation window');fig.tight_layout();fig.savefig(o/f'ID{int(batch["alloy_id"][0]):02d}_reconstruction.png',dpi=160);plt.close(fig)
+   fig.suptitle(f'ID {int(batch["alloy_id"][0])}: first fixed evaluation window');fig.tight_layout();fig.savefig(o/f'ID{int(batch["alloy_id"][0]):02d}_原图与VAE重建.png',dpi=160);plt.close(fig)
    if head is None:continue
    pred=head(z).cpu().numpy()[0];actual=batch['composition'].numpy()[0]
    for j,e in enumerate(ELEMENTS):rows.append({'alloy_id':int(batch['alloy_id'][0]),'element':e,'recorded_wt_pct':float(actual[j]),'predicted_wt_pct':float(pred[j]),'abs_error_wt_pct':float(abs(pred[j]-actual[j])),'active_in_training':bool(ck['config']['composition_active_mask'][j])})
@@ -42,7 +42,8 @@ def main():
  for e in (ELEMENTS if rows else []):
   rr=[r for r in rows if r['element']==e];x=np.array([r['recorded_wt_pct'] for r in rr]);y=np.array([r['predicted_wt_pct'] for r in rr]);fig,ax=plt.subplots(figsize=(5,5));ax.scatter(x,y);lo=min(x.min(),y.min());hi=max(x.max(),y.max());pad=max((hi-lo)*.1,.1);ax.plot([lo-pad,hi+pad],[lo-pad,hi+pad],'--',color='gray')
   for r in rr:ax.annotate(str(r['alloy_id']),(r['recorded_wt_pct'],r['predicted_wt_pct']),xytext=(4,4),textcoords='offset points')
-  ax.set(xlabel='Recorded composition (wt.%)',ylabel='Predicted composition (wt.%)',title=f'{e}: {a.partition}');ax.grid(alpha=.2);fig.tight_layout();fig.savefig(o/f'{e}_predicted_vs_recorded.png',dpi=160);plt.close(fig)
- (o/'evaluation_config.json').write_text(json.dumps(vars(a),ensure_ascii=False,indent=2),encoding='utf8');print(f'Evaluated {a.partition} IDs {sp[a.partition]}. Test output is not for hyperparameter selection.',flush=True)
+  ax.set(xlabel='Recorded composition (wt.%)',ylabel='Predicted composition (wt.%)',title=f'{e}: {a.partition}');ax.grid(alpha=.2);fig.tight_layout();fig.savefig(o/f'{e}_记录值与预测值.png',dpi=160);plt.close(fig)
+ config=vars(a).copy();config['checkpoint_sha256']=hashlib.sha256(Path(a.checkpoint).read_bytes()).hexdigest();config['source_vae_sha256']=ck.get('source_vae_sha256',config['checkpoint_sha256'])
+ (o/'evaluation_config.json').write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf8');print(f'Evaluated {a.partition} IDs {sp[a.partition]}. Test output is not for hyperparameter selection.',flush=True)
  if head is None: print('No composition head in checkpoint; reconstruction only.',flush=True)
 if __name__=='__main__':main()

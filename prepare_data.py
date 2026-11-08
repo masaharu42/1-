@@ -15,7 +15,7 @@ def sha(p):
 def ids(text):return [int(x.strip()) for x in text.split(',') if x.strip()]
 def main():
  p=argparse.ArgumentParser(description='Copy original Euler+GB BMPs and create explicitly alloy-level split.')
- p.add_argument('--images-dir',type=Path,default=DEFAULT_IMAGES);p.add_argument('--compositions',type=Path,required=True);p.add_argument('--output',type=Path,default=PROJECT/'data');p.add_argument('--val-ids',default='14');p.add_argument('--test-ids',default='18');p.add_argument('--overwrite',action='store_true',help='Replace prepared data files; source data are never modified.')
+ p.add_argument('--images-dir',type=Path,default=DEFAULT_IMAGES);p.add_argument('--compositions',type=Path,required=True);p.add_argument('--output',type=Path,default=PROJECT/'data');p.add_argument('--val-ids',default='14');p.add_argument('--test-ids',default='19');p.add_argument('--overwrite',action='store_true',help='Replace prepared data files; source data are never modified.')
  a=p.parse_args();out=a.output.resolve(); manifest=out/'manifest.json'
  if manifest.exists() and not a.overwrite: raise FileExistsError(f'{manifest} exists; use --overwrite only if intended')
  with a.compositions.open(encoding='utf-8-sig',newline='') as f: rows=list(csv.DictReader(f))
