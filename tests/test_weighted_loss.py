@@ -14,3 +14,10 @@ class WeightedLossTest(unittest.TestCase):
  def test_absent_main_element_rejected(self):
   p=torch.zeros((1,9));m=torch.ones(9,dtype=torch.bool);m[2]=False
   with self.assertRaises(ValueError):composition_loss(p,p,torch.ones(9),m,'main3',.7)
+ def test_equal_main_error_has_equal_contribution_with_shared_scale(self):
+  mask=torch.ones(9,dtype=torch.bool);scale=torch.tensor([5.,5.,5.,1.,1.,1.,1.,1.,1.]);target=torch.zeros((1,9))
+  losses=[]
+  for index in range(3):
+   pred=torch.zeros((1,9));pred[0,index]=1
+   losses.append(composition_loss(pred,target,scale,mask,'main3',.7).item())
+  self.assertAlmostEqual(max(losses),min(losses),places=7)
