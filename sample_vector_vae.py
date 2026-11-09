@@ -41,12 +41,15 @@ def main():
     with torch.no_grad():
         images = torch.cat([ds[i]['images'] for i in range(2)]).to(dev); images = F.interpolate(images, size=(128, 128), mode='nearest')
         means, _ = model.encode(images); weights = torch.linspace(0, 1, 6, device=dev).unsqueeze(1); z = (1 - weights) * means[0] + weights * means[1]
-        interpolated = model.decode(z); prior = model.decode(torch.randn(4, 128, device=dev))
+        prior_latents = torch.randn(4, 128, device=dev)
+        interpolated = model.decode(z); prior = model.decode(prior_latents)
         fig, axes = plt.subplots(1, 6, figsize=(15, 3))
         for i, ax in enumerate(axes):
-            save_image(interpolated[i], out / f'插值_{i:02d}.png'); ax.imshow(((interpolated[i].cpu().clamp(-1,1).permute(1,2,0).numpy()+1)/2)); ax.set_title(f'{i/5:.1f}'); ax.axis('off')
+            save_image(interpolated[i], out / f'插值_{i:02d}.png'); torch.save(z[i:i+1].cpu(), out / f'插值潜变量_{i:02d}.pt'); ax.imshow(((interpolated[i].cpu().clamp(-1,1).permute(1,2,0).numpy()+1)/2)); ax.set_title(f'{i/5:.1f}'); ax.axis('off')
         fig.suptitle(f'Posterior mean interpolation ID{a.id_a:02d} to ID{a.id_b:02d}'); fig.tight_layout(); fig.savefig(out / '潜变量插值总览.png', dpi=150); plt.close(fig)
-        for i in range(4): save_image(prior[i], out / f'标准正态采样_{i:02d}.png')
+        for i in range(4):
+            save_image(prior[i], out / f'标准正态采样_{i:02d}.png')
+            torch.save(prior_latents[i:i+1].cpu(), out / f'标准正态潜变量_{i:02d}.pt')
         save_image(images[0], out / f'ID{a.id_a:02d}_输入窗口.png'); save_image(images[1], out / f'ID{a.id_b:02d}_输入窗口.png')
     (out / 'sample_config.json').write_text(json.dumps(vars(a), ensure_ascii=False, indent=2), encoding='utf-8')
     print('Saved posterior-mean interpolation and standard-normal prior samples; inspect prior distribution mismatch.', flush=True)

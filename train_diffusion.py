@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from diffusers import UNet2DModel, DDPMScheduler
 from data import AlloyDataset, load_split
 from model import build_vae
+from vector_vae import VectorVAE
 
 
 def parser():
@@ -30,7 +31,23 @@ def make_unet(size,base):
 
 def vq(vae,im):
  # mean avoids random VAE perturbation for validation and ensures stable coarse condition
- with torch.no_grad(): return vae.decode(vae.encode(im).latent_dist.mean).sample.clamp(-1,1)
+ with torch.no_grad():
+  if isinstance(vae,VectorVAE):return vae.decode(vae.encode(im)[0]).clamp(-1,1)
+  return vae.decode(vae.encode(im).latent_dist.mean).sample.clamp(-1,1)
+
+def load_condition_vae(checkpoint,device,patch_size):
+ if 'vae' in checkpoint:
+  if patch_size!=256:raise ValueError('Spatial VAE requires patch-size 256')
+  vae=build_vae();vae.load_state_dict(checkpoint['vae']);source_patch=256
+ elif 'model' in checkpoint:
+  if patch_size!=128:raise ValueError('128D vector VAE requires patch-size 128')
+  vae=VectorVAE();vae.load_state_dict(checkpoint['model']);source_patch=256
+ else:raise ValueError('Unsupported VAE checkpoint')
+ return vae.to(device).eval().requires_grad_(False),source_patch
+
+def resize_for_diffusion(images,patch_size):
+ if images.shape[-2:] == (patch_size,patch_size):return images
+ return F.interpolate(images,size=(patch_size,patch_size),mode='nearest')
 
 def corrupt_condition(images,kind,probability):
  """Damage only VAE inputs; the original geometric-transformed target stays clean."""
@@ -70,9 +87,9 @@ def run():
  split=load_split(args.split);ck=torch.load(args.vae_checkpoint,map_location='cpu',weights_only=False);validate_splits(ck,split)
  manifest_sha256=hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
  if ck['config'].get('manifest_sha256')!=manifest_sha256:raise ValueError('VAE checkpoint dataset manifest SHA256 does not match diffusion dataset; cannot validate data provenance')
- vae=build_vae().to(device);vae.load_state_dict(ck['vae']);vae.eval().requires_grad_(False)
- train=AlloyDataset(args.manifest,split['train'],patch_size=args.patch_size,windows_per_alloy=args.windows_per_alloy,mode='train',seed=args.seed,train_flip=args.train_flip,train_rotate=args.train_rotate)
- val=AlloyDataset(args.manifest,split['val'],patch_size=args.patch_size,windows_per_alloy=args.eval_windows,mode='eval',seed=args.seed)
+ vae,source_patch=load_condition_vae(ck,device,args.patch_size)
+ train=AlloyDataset(args.manifest,split['train'],patch_size=source_patch,windows_per_alloy=args.windows_per_alloy,mode='train',seed=args.seed,train_flip=args.train_flip,train_rotate=args.train_rotate)
+ val=AlloyDataset(args.manifest,split['val'],patch_size=source_patch,windows_per_alloy=args.eval_windows,mode='eval',seed=args.seed)
  dl=DataLoader(train,batch_size=args.batch_size,shuffle=True,num_workers=args.workers,pin_memory=device.type=='cuda');vl=DataLoader(val,batch_size=1,shuffle=False,num_workers=args.workers)
  if not len(dl) or not len(vl):raise ValueError('Train and validation loaders must be non-empty')
  # Refuse silently changed source images; manifest SHA alone does not protect image contents.
@@ -111,7 +128,7 @@ def run():
   unet.eval(); totals=[];gen=torch.Generator(device=device).manual_seed(args.seed+98765)
   with torch.no_grad():
    for batch in vl:
-    im=batch['images'].flatten(0,1).to(device);coarse=vq(vae,im);noise=torch.randn(im.shape,generator=gen,device=device);t=torch.randint(0,args.timesteps,(len(im),),generator=gen,device=device);noisy=sched.add_noise(im,noise,t)
+    im=resize_for_diffusion(batch['images'].flatten(0,1).to(device),args.patch_size);coarse=vq(vae,im);noise=torch.randn(im.shape,generator=gen,device=device);t=torch.randint(0,args.timesteps,(len(im),),generator=gen,device=device);noisy=sched.add_noise(im,noise,t)
     with torch.autocast(device_type=device.type,dtype=dtype,enabled=amp!='no'): pred=unet(torch.cat([noisy,coarse],1),t).sample
     totals.append(F.mse_loss(pred.float(),noise.float()).item())
   unet.train();return float(np.mean(totals))
@@ -128,7 +145,7 @@ def run():
    for _ in range(args.grad_accum):
     try:batch=next(it)
     except StopIteration:it=iter(dl);batch=next(it)
-    im=batch['images'].flatten(0,1).to(device);condition=corrupt_condition(im,args.condition_corruption,args.corruption_prob);coarse=vq(vae,condition);noise=torch.randn_like(im);t=torch.randint(0,args.timesteps,(len(im),),device=device);noisy=sched.add_noise(im,noise,t)
+    im=resize_for_diffusion(batch['images'].flatten(0,1).to(device),args.patch_size);condition=corrupt_condition(im,args.condition_corruption,args.corruption_prob);coarse=vq(vae,condition);noise=torch.randn_like(im);t=torch.randint(0,args.timesteps,(len(im),),device=device);noisy=sched.add_noise(im,noise,t)
     with torch.autocast(device_type=device.type,dtype=dtype,enabled=amp!='no'):pred=unet(torch.cat([noisy,coarse],1),t).sample;loss=F.mse_loss(pred.float(),noise.float())
     if not torch.isfinite(loss): raise RuntimeError('Non-finite loss; stopped before optimizer update')
     scaler.scale(loss/args.grad_accum).backward();batch_losses.append(loss.item())
