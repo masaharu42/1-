@@ -18,6 +18,8 @@ def arguments():
  p.add_argument('--patch-size',type=int,default=256);p.add_argument('--alloys-per-batch',type=int,default=2);p.add_argument('--windows-per-alloy',type=int,default=4)
  p.add_argument('--eval-windows',type=int,default=16);p.add_argument('--workers',type=int,default=2);p.add_argument('--steps',type=int,default=5000);p.add_argument('--lr',type=float,default=2e-4)
  p.add_argument('--edge-weight',type=float,default=.2);p.add_argument('--kl-weight',type=float,default=1e-6);p.add_argument('--composition-weight',type=float,default=0.0)
+ p.add_argument('--composition-loss-mode',choices=['uniform','main3'],default='uniform',help='main3 prioritizes Ni, Fe, Cr; uniform preserves the original loss')
+ p.add_argument('--main-elements-weight',type=float,default=0.7,help='Share of composition loss assigned to Ni, Fe, Cr in main3 mode')
  p.add_argument('--seed',type=int,default=42);p.add_argument('--eval-every',type=int,default=250);p.add_argument('--save-every',type=int,default=500);p.add_argument('--log-every',type=int,default=10)
  p.add_argument('--resume',default=None,help='Resume from a trusted checkpoint within the same output directory.')
  p.add_argument('--train-rotate',action='store_true',help='Random right-angle pixel rotation during training only; orientation and loading axis are not transformed.')
@@ -31,6 +33,14 @@ def seed_all(seed):
  random.seed(seed);np.random.seed(seed);torch.manual_seed(seed)
  if torch.cuda.is_available():torch.cuda.manual_seed_all(seed)
 
+def composition_loss(pred,target,scale,mask,mode,main_weight):
+ errors=((pred-target)/scale).square()
+ if mode=='uniform':return errors[:,mask].mean() if mask.any() else errors.new_zeros(())
+ main=torch.tensor([e in ('Ni','Fe','Cr') for e in ELEMENTS],device=pred.device,dtype=torch.bool)
+ primary=main & mask;other=(~main) & mask
+ if int(primary.sum())!=3 or not bool(other.any()):raise ValueError('main3 requires varying Ni, Fe, Cr and at least one varying other element in training')
+ return main_weight*errors[:,primary].mean()+(1-main_weight)*errors[:,other].mean()
+
 
 def main():
  args=arguments()
@@ -38,6 +48,8 @@ def main():
  if min(args.alloys_per_batch,args.windows_per_alloy,args.eval_windows,args.steps,args.eval_every,args.save_every,args.log_every)<1: raise ValueError('Positive batch, steps and intervals required')
  if not 0<=args.corruption_prob<=1: raise ValueError('corruption probability must be between 0 and 1')
  if args.composition_weight<0: raise ValueError('composition weight must be nonnegative')
+ if not 0<args.main_elements_weight<1:raise ValueError('main elements weight must be strictly between 0 and 1')
+ if args.composition_loss_mode=='main3' and args.composition_weight<=0:raise ValueError('main3 requires positive composition weight')
  if args.device=='cuda' and not torch.cuda.is_available(): raise RuntimeError('CUDA not available; install CUDA PyTorch on training server or explicitly use --device cpu.')
  if args.device=='cpu' and args.precision!='fp32': raise ValueError('CPU requires --precision fp32')
  seed_all(args.seed);device=torch.device(args.device);sp=load_split(args.split)
@@ -63,9 +75,10 @@ def main():
  # Fixed train-only per-element scaling; constant columns excluded from regression loss.
  values=np.asarray(train.compositions,dtype=np.float32);std=values.std(axis=0);active=std>1e-6
  scale=torch.tensor(np.maximum(std,0.1),device=device);mask=torch.tensor(active,device=device)
+ if args.composition_loss_mode=='main3' and (not all(active[ELEMENTS.index(e)] for e in ('Ni','Fe','Cr')) or not any(active[i] for i,e in enumerate(ELEMENTS) if e not in ('Ni','Fe','Cr'))):raise ValueError('main3 requires variable Ni, Fe, Cr and at least one variable other element in training')
  out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
  cfg={'manifest_sha256':hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest(),'split_sha256':hashlib.sha256(Path(args.split).read_bytes()).hexdigest(),'args':vars(args).copy(),'train_ids':sp['train'],'val_ids':sp['val'],'test_ids':sp['test'],'composition_elements':list(ELEMENTS),'train_std_wt_percent':std.tolist(),'composition_active_mask':active.tolist(),'image_scale':'[-1,1]','latent_channels':4,'vae_downsample_factor':4}
- metrics=out/'metrics.csv';fields=['step','phase','total','reconstruction_l1','sobel_l1','kl','composition_loss','composition_mae_wt','lr','elapsed_seconds','gpu_peak_gb']
+ metrics=out/'metrics.csv';fields=['step','phase','total','reconstruction_l1','sobel_l1','kl','composition_loss','composition_mae_wt','lr','elapsed_seconds','gpu_peak_gb','Ni_mae_wt','Fe_mae_wt','Cr_mae_wt']
  step=0;prior_elapsed=0.0
  if args.resume:
   ckpt_path=Path(args.resume).resolve()
@@ -79,6 +92,11 @@ def main():
   immutable=('patch_size','alloys_per_batch','windows_per_alloy','eval_windows','workers','lr','edge_weight','kl_weight','composition_weight','seed','precision','device','train_flip','train_rotate','corruption_prob')
   for key in immutable:
    if old_args.get(key)!=current[key]:raise ValueError(f'Resume argument mismatch: {key}: {old_args.get(key)} != {current[key]}')
+  for key,default in (('composition_loss_mode','uniform'),('main_elements_weight',0.7)):
+   if old_args.get(key,default)!=current[key]:raise ValueError(f'Resume argument mismatch: {key}')
+  with metrics.open(newline='',encoding='utf-8') as f:existing_fields=next(csv.reader(f))
+  if existing_fields==fields[:-3]:fields=existing_fields
+  elif existing_fields!=fields:raise ValueError('Unexpected metrics header; refusing to append')
   if 'scaler' not in state:raise ValueError('Checkpoint has no AMP scaler state; cannot safely resume.')
   step=int(state['step'])
   if args.steps<=step:raise ValueError('Requested --steps must exceed checkpoint step.')
@@ -115,15 +133,17 @@ def main():
    # Regression from the posterior mean, while the reconstruction still samples z.
    means=posterior.mode().reshape(B,K,*z.shape[1:]);pred=head(means) if args.composition_weight>0 else None
    if pred is not None:
-    comp=(((pred-c)/scale)[:,mask].square()).mean() if mask.any() else rec.new_zeros(())
+    comp=composition_loss(pred,c,scale,mask,args.composition_loss_mode,args.main_elements_weight)
     mae=(pred-c).abs().mean()
    else:comp=rec.new_zeros(());mae=rec.new_full((),float('nan'))
    loss=rec+args.edge_weight*edge+args.kl_weight*kl+args.composition_weight*comp
-  return loss,rec,edge,kl,comp,mae
+  per_element=(pred-c).abs().mean(dim=0) if pred is not None else torch.full((len(ELEMENTS),),float('nan'),device=device)
+  return loss,rec,edge,kl,comp,mae,per_element[0],per_element[1],per_element[2]
  def record(step,phase,vals):
-  nums=[float(v.detach().cpu()) for v in vals];row=dict(zip(fields[:8],[step,phase]+nums));row.update(lr=opt.param_groups[0]['lr'],elapsed_seconds=round(prior_elapsed+time.monotonic()-start,2),gpu_peak_gb=round(torch.cuda.max_memory_allocated()/1024**3,3) if device.type=='cuda' else 0)
+  nums=[float(v.detach().cpu()) for v in vals];row=dict(zip(fields[:8],[step,phase]+nums[:6]));row.update(lr=opt.param_groups[0]['lr'],elapsed_seconds=round(prior_elapsed+time.monotonic()-start,2),gpu_peak_gb=round(torch.cuda.max_memory_allocated()/1024**3,3) if device.type=='cuda' else 0)
+  if len(fields)>11:row.update(Ni_mae_wt=nums[6],Fe_mae_wt=nums[7],Cr_mae_wt=nums[8])
   with metrics.open('a',newline='',encoding='utf-8') as f:csv.DictWriter(f,fieldnames=fields).writerow(row)
-  print(f"{phase:5} step {step:6}/{args.steps} loss={nums[0]:.5f} L1={nums[1]:.5f} edge={nums[2]:.5f} KL={nums[3]:.4f} comp={nums[4]:.4f} comp_MAE={nums[5]:.3f}wt% elapsed={row['elapsed_seconds']:.0f}s peak={row['gpu_peak_gb']:.2f}GB",flush=True)
+  print(f"{phase:5} step {step:6}/{args.steps} loss={nums[0]:.5f} L1={nums[1]:.5f} edge={nums[2]:.5f} KL={nums[3]:.4f} comp={nums[4]:.4f} comp_MAE={nums[5]:.3f} Ni={nums[6]:.3f} Fe={nums[7]:.3f} Cr={nums[8]:.3f}wt% elapsed={row['elapsed_seconds']:.0f}s peak={row['gpu_peak_gb']:.2f}GB",flush=True)
  def save(step):
   state={'vae':vae.state_dict(),'composition_head':head.state_dict() if args.composition_weight>0 else None,'optimizer':opt.state_dict(),'scaler':scaler.state_dict(),'step':step,'elapsed_seconds':prior_elapsed+time.monotonic()-start,'config':cfg,'torch_rng_state':torch.get_rng_state(),'numpy_rng_state':np.random.get_state(),'python_rng_state':random.getstate()}
   if device.type=='cuda':state['cuda_rng_state']=torch.cuda.get_rng_state_all()
