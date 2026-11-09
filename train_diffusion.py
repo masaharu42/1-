@@ -19,6 +19,10 @@ def parser():
  p.add_argument('--manifest',required=True);p.add_argument('--split',required=True);p.add_argument('--vae-checkpoint',required=True);p.add_argument('--output',required=True)
  p.add_argument('--resume',help='Resume last.pt from the same output directory; appends metrics. DataLoader order is not bitwise restored.');p.add_argument('--patch-size',type=int,default=256);p.add_argument('--windows-per-alloy',type=int,default=4);p.add_argument('--batch-size',type=int,default=2,help='number of alloys, each with K windows')
  p.add_argument('--grad-accum',type=int,default=1);p.add_argument('--steps',type=int,default=10000);p.add_argument('--lr',type=float,default=1e-4);p.add_argument('--timesteps',type=int,default=1000)
+ p.add_argument('--train-flip',action='store_true',help='Apply random pixel flips before deriving the VAE condition')
+ p.add_argument('--train-rotate',action='store_true',help='Apply random 90-degree rotations before deriving the VAE condition')
+ p.add_argument('--condition-corruption',choices=['none','blur','mask','affine','erode','dilate','mixed'],default='none',help='Experimental damage to VAE condition input; diffusion target remains clean')
+ p.add_argument('--corruption-prob',type=float,default=0.2,help='Per-window probability of damaging the condition input')
  p.add_argument('--base-channels',type=int,default=64);p.add_argument('--workers',type=int,default=0);p.add_argument('--seed',type=int,default=42);p.add_argument('--val-every',type=int,default=250);p.add_argument('--save-every',type=int,default=1000);p.add_argument('--log-every',type=int,default=20);p.add_argument('--eval-windows',type=int,default=8);p.add_argument('--amp',choices=['no','fp16','bf16'],default='bf16');p.add_argument('--device',default='cuda');return p
 
 def make_unet(size,base):
@@ -27,6 +31,25 @@ def make_unet(size,base):
 def vq(vae,im):
  # mean avoids random VAE perturbation for validation and ensures stable coarse condition
  with torch.no_grad(): return vae.decode(vae.encode(im).latent_dist.mean).sample.clamp(-1,1)
+
+def corrupt_condition(images,kind,probability):
+ """Damage only VAE inputs; the original geometric-transformed target stays clean."""
+ if kind=='none' or probability==0:return images
+ out=images.clone()
+ for index in range(len(images)):
+  if torch.rand((),device=images.device).item()>=probability:continue
+  operation=kind
+  if operation=='mixed':operation=['blur','mask','affine','erode','dilate'][int(torch.randint(5,(),device=images.device).item())]
+  image=images[index:index+1]
+  if operation=='mask':
+   h,w=image.shape[-2:];size=max(2,int(min(h,w)*0.08));y=int(torch.randint(h-size+1,(),device=images.device));x=int(torch.randint(w-size+1,(),device=images.device));out[index,:,y:y+size,x:x+size]=-1
+  elif operation=='blur':
+   coords=torch.arange(-2,3,device=images.device,dtype=image.dtype);kernel=torch.exp(-coords.square()/2);kernel=kernel/kernel.sum();kernel=(kernel[:,None]*kernel[None,:]).expand(image.shape[1],1,5,5);out[index]=F.conv2d(F.pad(image,(2,2,2,2),mode='replicate'),kernel,groups=image.shape[1])[0]
+  elif operation=='affine':
+   theta=image.new_tensor([[[1.,0.04,0.],[0.02,1.,0.]]]);grid=F.affine_grid(theta,image.size(),align_corners=False);out[index]=F.grid_sample(image+1,grid,mode='nearest',padding_mode='zeros',align_corners=False)[0]-1
+  elif operation=='dilate':out[index]=F.max_pool2d(image,3,stride=1,padding=1)[0]
+  elif operation=='erode':out[index]=-F.max_pool2d(-image,3,stride=1,padding=1)[0]
+ return out
 
 def validate_splits(checkpoint,split):
  for key in ('train','val','test'):
@@ -40,6 +63,7 @@ def run():
  if args.resume and (not (out/'metrics.csv').is_file() or not (out/'run_config.json').is_file()):raise FileNotFoundError('Resume requires metrics.csv and run_config.json in original --output directory')
  if args.resume and Path(args.resume).resolve().parent!=out.resolve():raise ValueError('--resume checkpoint must be in original --output directory')
  if args.steps<1 or min(args.val_every,args.log_every,args.save_every,args.grad_accum,args.batch_size,args.windows_per_alloy,args.eval_windows)<1:raise ValueError('All step counts and batch sizes must be positive')
+ if not 0<=args.corruption_prob<=1:raise ValueError('corruption probability must be between 0 and 1')
  random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
  if args.device.startswith('cuda') and not torch.cuda.is_available():raise RuntimeError('CUDA requested but unavailable; use --device cpu for smoke tests')
  device=torch.device(args.device);amp=args.amp if device.type=='cuda' else 'no';dtype=torch.bfloat16 if amp=='bf16' else torch.float16
@@ -47,7 +71,7 @@ def run():
  manifest_sha256=hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
  if ck['config'].get('manifest_sha256')!=manifest_sha256:raise ValueError('VAE checkpoint dataset manifest SHA256 does not match diffusion dataset; cannot validate data provenance')
  vae=build_vae().to(device);vae.load_state_dict(ck['vae']);vae.eval().requires_grad_(False)
- train=AlloyDataset(args.manifest,split['train'],patch_size=args.patch_size,windows_per_alloy=args.windows_per_alloy,mode='train',seed=args.seed)
+ train=AlloyDataset(args.manifest,split['train'],patch_size=args.patch_size,windows_per_alloy=args.windows_per_alloy,mode='train',seed=args.seed,train_flip=args.train_flip,train_rotate=args.train_rotate)
  val=AlloyDataset(args.manifest,split['val'],patch_size=args.patch_size,windows_per_alloy=args.eval_windows,mode='eval',seed=args.seed)
  dl=DataLoader(train,batch_size=args.batch_size,shuffle=True,num_workers=args.workers,pin_memory=device.type=='cuda');vl=DataLoader(val,batch_size=1,shuffle=False,num_workers=args.workers)
  if not len(dl) or not len(vl):raise ValueError('Train and validation loaders must be non-empty')
@@ -68,6 +92,8 @@ def run():
   old=previous.get('config',{})
   for key in required:
    if old.get(key)!=getattr(args,key):raise ValueError(f'Resume configuration mismatch for {key}: {old.get(key)} vs {getattr(args,key)}')
+  for key,default in (('train_flip',False),('train_rotate',False),('condition_corruption','none'),('corruption_prob',0.2)):
+   if old.get(key,default)!=getattr(args,key):raise ValueError(f'Resume augmentation mismatch for {key}')
   step=int(previous['step'])
   if step>=args.steps:raise ValueError('--steps must be greater than the checkpoint step')
   with log.open(newline='',encoding='utf-8') as f:
@@ -102,7 +128,7 @@ def run():
    for _ in range(args.grad_accum):
     try:batch=next(it)
     except StopIteration:it=iter(dl);batch=next(it)
-    im=batch['images'].flatten(0,1).to(device);coarse=vq(vae,im);noise=torch.randn_like(im);t=torch.randint(0,args.timesteps,(len(im),),device=device);noisy=sched.add_noise(im,noise,t)
+    im=batch['images'].flatten(0,1).to(device);condition=corrupt_condition(im,args.condition_corruption,args.corruption_prob);coarse=vq(vae,condition);noise=torch.randn_like(im);t=torch.randint(0,args.timesteps,(len(im),),device=device);noisy=sched.add_noise(im,noise,t)
     with torch.autocast(device_type=device.type,dtype=dtype,enabled=amp!='no'):pred=unet(torch.cat([noisy,coarse],1),t).sample;loss=F.mse_loss(pred.float(),noise.float())
     if not torch.isfinite(loss): raise RuntimeError('Non-finite loss; stopped before optimizer update')
     scaler.scale(loss/args.grad_accum).backward();batch_losses.append(loss.item())
