@@ -20,6 +20,7 @@ def parser():
  p.add_argument('--manifest',required=True);p.add_argument('--split',required=True);p.add_argument('--vae-checkpoint',required=True);p.add_argument('--output',required=True)
  p.add_argument('--resume',help='Resume last.pt from the same output directory; appends metrics. DataLoader order is not bitwise restored.');p.add_argument('--patch-size',type=int,default=256);p.add_argument('--windows-per-alloy',type=int,default=4);p.add_argument('--batch-size',type=int,default=2,help='number of alloys, each with K windows')
  p.add_argument('--grad-accum',type=int,default=1);p.add_argument('--steps',type=int,default=10000);p.add_argument('--lr',type=float,default=1e-4);p.add_argument('--timesteps',type=int,default=1000)
+ p.add_argument('--pixel-loss',choices=['mse','l1'],default='mse');p.add_argument('--ssim-weight',type=float,default=0.0);p.add_argument('--edge-weight',type=float,default=0.0)
  p.add_argument('--train-flip',action='store_true',help='Apply random pixel flips before deriving the VAE condition')
  p.add_argument('--train-rotate',action='store_true',help='Apply random 90-degree rotations before deriving the VAE condition')
  p.add_argument('--condition-corruption',choices=['none','blur','mask','affine','erode','dilate','mixed'],default='none',help='Experimental damage to VAE condition input; diffusion target remains clean')
@@ -48,6 +49,21 @@ def load_condition_vae(checkpoint,device,patch_size):
 def resize_for_diffusion(images,patch_size):
  if images.shape[-2:] == (patch_size,patch_size):return images
  return F.interpolate(images,size=(patch_size,patch_size),mode='nearest')
+
+def noise_losses(prediction, target, pixel_loss):
+ """SSIM and Sobel apply to signed predicted and true noise, not decoded images."""
+ x=prediction.float();y=target.float()
+ pixel=F.l1_loss(x,y) if pixel_loss=='l1' else F.mse_loss(x,y)
+ mu_x=F.avg_pool2d(x,11,1,5);mu_y=F.avg_pool2d(y,11,1,5)
+ var_x=(F.avg_pool2d(x*x,11,1,5)-mu_x.square()).clamp_min(0)
+ var_y=(F.avg_pool2d(y*y,11,1,5)-mu_y.square()).clamp_min(0)
+ cov=F.avg_pool2d(x*y,11,1,5)-mu_x*mu_y
+ c1=(0.01*6)**2;c2=(0.03*6)**2
+ ssim=1-(((2*mu_x*mu_y+c1)*(2*cov+c2))/((mu_x.square()+mu_y.square()+c1)*(var_x+var_y+c2))).mean()
+ k=x.new_tensor([[-1,0,1],[-2,0,2],[-1,0,1]]).reshape(1,1,3,3)
+ kx=k.repeat(x.shape[1],1,1,1);ky=k.transpose(-1,-2).repeat(x.shape[1],1,1,1)
+ edge=(F.l1_loss(F.conv2d(x,kx,padding=1,groups=x.shape[1]),F.conv2d(y,kx,padding=1,groups=y.shape[1]))+F.l1_loss(F.conv2d(x,ky,padding=1,groups=x.shape[1]),F.conv2d(y,ky,padding=1,groups=y.shape[1])))/2
+ return pixel,ssim,edge
 
 def corrupt_condition(images,kind,probability):
  """Damage only VAE inputs; the original geometric-transformed target stays clean."""
@@ -81,6 +97,7 @@ def run():
  if args.resume and Path(args.resume).resolve().parent!=out.resolve():raise ValueError('--resume checkpoint must be in original --output directory')
  if args.steps<1 or min(args.val_every,args.log_every,args.save_every,args.grad_accum,args.batch_size,args.windows_per_alloy,args.eval_windows)<1:raise ValueError('All step counts and batch sizes must be positive')
  if not 0<=args.corruption_prob<=1:raise ValueError('corruption probability must be between 0 and 1')
+ if not np.isfinite(args.ssim_weight) or not np.isfinite(args.edge_weight) or min(args.ssim_weight,args.edge_weight)<0:raise ValueError('loss weights must be finite and nonnegative')
  random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
  if args.device.startswith('cuda') and not torch.cuda.is_available():raise RuntimeError('CUDA requested but unavailable; use --device cpu for smoke tests')
  device=torch.device(args.device);amp=args.amp if device.type=='cuda' else 'no';dtype=torch.bfloat16 if amp=='bf16' else torch.float16
@@ -109,7 +126,7 @@ def run():
   old=previous.get('config',{})
   for key in required:
    if old.get(key)!=getattr(args,key):raise ValueError(f'Resume configuration mismatch for {key}: {old.get(key)} vs {getattr(args,key)}')
-  for key,default in (('train_flip',False),('train_rotate',False),('condition_corruption','none'),('corruption_prob',0.2)):
+  for key,default in (('train_flip',False),('train_rotate',False),('condition_corruption','none'),('corruption_prob',0.2),('pixel_loss','mse'),('ssim_weight',0.0),('edge_weight',0.0)):
    if old.get(key,default)!=getattr(args,key):raise ValueError(f'Resume augmentation mismatch for {key}')
   step=int(previous['step'])
   if step>=args.steps:raise ValueError('--steps must be greater than the checkpoint step')
@@ -136,23 +153,32 @@ def run():
   state={'unet':unet.state_dict(),'optimizer':opt.state_dict(),'scaler':scaler.state_dict(),'step':step,'segment':segment,'val_loss':val_loss,'best_val':best,'elapsed_sec':previous_elapsed+time.time()-start,'config':vars(args),'split':split,'vae_checkpoint':str(Path(args.vae_checkpoint).resolve()),'vae_sha256':vae_sha256,'manifest_sha256':manifest_sha256,'python_rng_state':random.getstate(),'numpy_rng_state':np.random.get_state(),'torch_rng_state':torch.get_rng_state()}
   if device.type=='cuda':state['cuda_rng_state']=torch.cuda.get_rng_state_all()
   temp=path.with_suffix(path.suffix+'.tmp');torch.save(state,temp);temp.replace(path)
+ fields=['segment','step','train_noise_mse','val_noise_mse','elapsed_sec','lr','gpu_peak_gb','train_total_loss','train_pixel_loss','train_ssim_loss','train_edge_loss','eta_seconds']
+ if args.resume:
+  with log.open(newline='',encoding='utf-8') as f: fields=next(csv.reader(f))
  with log.open('a' if args.resume else 'w',newline='',encoding='utf-8') as f:
-  writer=csv.DictWriter(f,fieldnames=['segment','step','train_noise_mse','val_noise_mse','elapsed_sec','lr','gpu_peak_gb'])
+  writer=csv.DictWriter(f,fieldnames=fields,extrasaction='ignore')
   if not args.resume:writer.writeheader()
   unet.train()
   while step<args.steps:
-   batch_losses=[]
+   batch_losses=[];components=[]
    for _ in range(args.grad_accum):
     try:batch=next(it)
     except StopIteration:it=iter(dl);batch=next(it)
     im=resize_for_diffusion(batch['images'].flatten(0,1).to(device),args.patch_size);condition=corrupt_condition(im,args.condition_corruption,args.corruption_prob);coarse=vq(vae,condition);noise=torch.randn_like(im);t=torch.randint(0,args.timesteps,(len(im),),device=device);noisy=sched.add_noise(im,noise,t)
-    with torch.autocast(device_type=device.type,dtype=dtype,enabled=amp!='no'):pred=unet(torch.cat([noisy,coarse],1),t).sample;loss=F.mse_loss(pred.float(),noise.float())
+    with torch.autocast(device_type=device.type,dtype=dtype,enabled=amp!='no'):pred=unet(torch.cat([noisy,coarse],1),t).sample
+    if args.ssim_weight or args.edge_weight:
+     pixel,ssim,edge=noise_losses(pred,noise,args.pixel_loss);loss=pixel+args.ssim_weight*ssim+args.edge_weight*edge
+    else:
+     pixel=F.l1_loss(pred.float(),noise.float()) if args.pixel_loss=='l1' else F.mse_loss(pred.float(),noise.float());ssim=pixel.new_zeros(());edge=pixel.new_zeros(());loss=pixel
     if not torch.isfinite(loss): raise RuntimeError('Non-finite loss; stopped before optimizer update')
-    scaler.scale(loss/args.grad_accum).backward();batch_losses.append(loss.item())
+    scaler.scale(loss/args.grad_accum).backward();batch_losses.append(F.mse_loss(pred.float(),noise.float()).item());components.append([loss.item(),pixel.item(),ssim.item(),edge.item()])
    scaler.unscale_(opt);torch.nn.utils.clip_grad_norm_(unet.parameters(),1.0);scaler.step(opt);scaler.update();opt.zero_grad(set_to_none=True);step+=1
    v=evaluate() if step%args.val_every==0 or step==args.steps else None
    if step%args.log_every==0 or v is not None:
-    record={'segment':segment,'step':step,'train_noise_mse':np.mean(batch_losses),'val_noise_mse':v if v is not None else '', 'elapsed_sec':round(previous_elapsed+time.time()-start,1),'lr':args.lr,'gpu_peak_gb':round(torch.cuda.max_memory_allocated(device)/1024**3,3) if device.type=='cuda' else ''};writer.writerow(record);f.flush();print(json.dumps(record,ensure_ascii=False),flush=True)
+    current_elapsed=time.time()-start;steps_this_run=step-int(previous['step']) if args.resume else step
+    eta=max(0,(args.steps-step)*current_elapsed/max(steps_this_run,1));mean_components=np.mean(components,axis=0)
+    record={'segment':segment,'step':step,'train_noise_mse':np.mean(batch_losses),'val_noise_mse':v if v is not None else '', 'elapsed_sec':round(previous_elapsed+current_elapsed,1),'lr':args.lr,'gpu_peak_gb':round(torch.cuda.max_memory_allocated(device)/1024**3,3) if device.type=='cuda' else '', 'train_total_loss':mean_components[0],'train_pixel_loss':mean_components[1],'train_ssim_loss':mean_components[2],'train_edge_loss':mean_components[3],'eta_seconds':round(eta)};writer.writerow(record);f.flush();print(json.dumps(record,ensure_ascii=False),flush=True)
    if v is not None and v<best:best=v;save(out/'best.pt',v)
    if step%args.save_every==0 or step==args.steps:save(out/'last.pt',v)
 if __name__=='__main__':run()
