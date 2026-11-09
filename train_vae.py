@@ -174,9 +174,11 @@ def main():
    if args.composition_weight>0 and (next_step%args.log_every==0 or next_step==1) and len(fields)>14:
     shared=vae.encoder.conv_out.weight
     image_loss=vals[1]+args.edge_weight*vals[2]+args.kl_weight*vals[3]
-    image_grad=torch.autograd.grad(image_loss,shared,retain_graph=True)[0]
-    comp_grad=torch.autograd.grad(args.composition_weight*vals[4],shared,retain_graph=True)[0]
-    gradient_norms=(float(image_grad.detach().float().norm().cpu()),float(comp_grad.detach().float().norm().cpu()))
+    # Match AMP loss scaling used by backward to avoid fp16 diagnostic underflow.
+    image_grad=torch.autograd.grad(scaler.scale(image_loss),shared,retain_graph=True)[0]
+    comp_grad=torch.autograd.grad(scaler.scale(args.composition_weight*vals[4]),shared,retain_graph=True)[0]
+    diagnostic_scale=scaler.get_scale()
+    gradient_norms=(float((image_grad.detach().float()/diagnostic_scale).norm().cpu()),float((comp_grad.detach().float()/diagnostic_scale).norm().cpu()))
    scaler.scale(vals[0]).backward();scaler.unscale_(opt);torch.nn.utils.clip_grad_norm_(params,1.0);scaler.step(opt);scaler.update();step=next_step
    if step%args.log_every==0 or step==1:record(step,'train',vals,gradient_norms)
    if step%args.eval_every==0 or step==args.steps:evaluate(step)

@@ -85,6 +85,8 @@ python plot_metrics.py runs/vae_B/metrics.csv --output runs/vae_B/plots
 
 ## 图像空间扩散细化（实验性）
 
+使用折 19 已训练 VAE 的服务器步骤和独立结果目录见 [折19 VAE条件扩散操作说明](折19_VAE条件扩散_服务器操作.md)。
+
 本阶段冻结已选 VAE，以它对真实窗口产生的粗重建图作为条件，训练 RGB 图像空间 DDPM 预测噪声；没有直接输入已知合金成分。它是参考 NC 思路的基础实现，当前使用噪声 MSE，尚未实现论文中的完整 SSIM/边缘训练损失。
 
 ```bash
