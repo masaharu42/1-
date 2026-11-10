@@ -5,7 +5,7 @@ from torch import nn
 class VectorVAE256(nn.Module):
     def __init__(self, latent_dim=256):
         super().__init__()
-        if latent_dim not in (128, 256): raise ValueError('latent_dim must be 128 or 256')
+        if latent_dim not in (128, 256, 512): raise ValueError('latent_dim must be 128, 256 or 512')
         self.latent_dim = latent_dim
         self.encoder = nn.Sequential(nn.Conv2d(3,32,3,padding=1),nn.ReLU(),nn.Conv2d(32,64,4,stride=2,padding=1),nn.ReLU(),nn.Conv2d(64,128,4,stride=2,padding=1),nn.ReLU(),nn.Conv2d(128,128,4,stride=2,padding=1),nn.ReLU(),nn.Flatten())
         self.mean=nn.Linear(128*32*32,latent_dim);self.logvar=nn.Linear(128*32*32,latent_dim)
