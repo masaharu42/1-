@@ -13,6 +13,7 @@ from diffusers import UNet2DModel, DDPMScheduler
 from data import AlloyDataset, load_split
 from model import build_vae
 from vector_vae import VectorVAE
+from vector_vae_256 import VectorVAE256
 
 
 def parser():
@@ -33,13 +34,16 @@ def make_unet(size,base):
 def vq(vae,im):
  # mean avoids random VAE perturbation for validation and ensures stable coarse condition
  with torch.no_grad():
-  if isinstance(vae,VectorVAE):return vae.decode(vae.encode(im)[0]).clamp(-1,1)
+  if isinstance(vae,(VectorVAE,VectorVAE256)):return vae.decode(vae.encode(im)[0]).clamp(-1,1)
   return vae.decode(vae.encode(im).latent_dist.mean).sample.clamp(-1,1)
 
 def load_condition_vae(checkpoint,device,patch_size):
  if 'vae' in checkpoint:
   if patch_size!=256:raise ValueError('Spatial VAE requires patch-size 256')
   vae=build_vae();vae.load_state_dict(checkpoint['vae']);source_patch=256
+ elif checkpoint.get('config',{}).get('model_arch')=='vector_vae_256':
+  if patch_size!=256:raise ValueError('Native 256px vector VAE requires patch-size 256')
+  vae=VectorVAE256(int(checkpoint['config']['latent_dim']));vae.load_state_dict(checkpoint['model']);source_patch=256
  elif 'model' in checkpoint:
   if patch_size!=128:raise ValueError('128D vector VAE requires patch-size 128')
   vae=VectorVAE();vae.load_state_dict(checkpoint['model']);source_patch=256

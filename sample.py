@@ -9,6 +9,7 @@ from PIL import Image
 import torch
 from diffusers import DDIMScheduler
 from vector_vae import VectorVAE
+from vector_vae_256 import VectorVAE256
 from train_diffusion import make_unet, load_condition_vae, resize_for_diffusion
 
 def save_image(t,path):
@@ -29,12 +30,12 @@ def run():
   if args.reference:
    img=Image.open(args.reference).convert('RGB');w,h=img.size
    if min(w,h)<source_patch:raise ValueError('reference image smaller than source crop size')
-   img=img.crop(((w-source_patch)//2,(h-source_patch)//2,(w-source_patch)//2+source_patch,(h-source_patch)//2+source_patch));arr=np.asarray(img,dtype=np.float32)/127.5-1; x=torch.from_numpy(arr).permute(2,0,1).unsqueeze(0).to(device);x=resize_for_diffusion(x,size);z=vae.encode(x)[0] if isinstance(vae,VectorVAE) else vae.encode(x).latent_dist.mean;save_image(x[0],out/'reference_crop.png')
+   img=img.crop(((w-source_patch)//2,(h-source_patch)//2,(w-source_patch)//2+source_patch,(h-source_patch)//2+source_patch));arr=np.asarray(img,dtype=np.float32)/127.5-1; x=torch.from_numpy(arr).permute(2,0,1).unsqueeze(0).to(device);x=resize_for_diffusion(x,size);z=vae.encode(x)[0] if isinstance(vae,(VectorVAE,VectorVAE256)) else vae.encode(x).latent_dist.mean;save_image(x[0],out/'reference_crop.png')
   else:
    z=torch.load(args.latent,map_location=device,weights_only=True)
-   expected=(1,128) if isinstance(vae,VectorVAE) else (1,4,size//4,size//4)
+   expected=(1,vae.latent_dim) if isinstance(vae,VectorVAE256) else ((1,128) if isinstance(vae,VectorVAE) else (1,4,size//4,size//4))
    if not isinstance(z,torch.Tensor) or z.shape!=expected:raise ValueError(f'latent shape must be {expected}')
-  coarse=(vae.decode(z) if isinstance(vae,VectorVAE) else vae.decode(z).sample).clamp(-1,1);save_image(coarse[0],out/'coarse.png');gen=torch.Generator(device=device).manual_seed(args.seed)
+  coarse=(vae.decode(z) if isinstance(vae,(VectorVAE,VectorVAE256)) else vae.decode(z).sample).clamp(-1,1);save_image(coarse[0],out/'coarse.png');gen=torch.Generator(device=device).manual_seed(args.seed)
   for i in range(args.count):
    image=torch.randn((1,3,size,size),generator=gen,device=device)
    for t in sched.timesteps:
