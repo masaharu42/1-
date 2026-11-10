@@ -14,7 +14,10 @@ from train_diffusion import load_condition_vae, make_unet, resize_for_diffusion,
 
 
 def sha(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as f:
+        for chunk in iter(lambda:f.read(1024*1024),b''):digest.update(chunk)
+    return digest.hexdigest()
 
 
 def load_crop(manifest, record, crop, device):
@@ -49,9 +52,12 @@ def main():
     if a.wrong_id not in split['train'] or a.wrong_id in a.ids:raise ValueError('Wrong-condition ID must be a different training alloy')
     if len(set(a.ids))!=len(a.ids) or any(i not in records for i in a.ids+[a.wrong_id]):raise ValueError('Unknown or duplicate IDs')
     if min(a.samples,a.noise_repeats,a.sample_steps)<1:raise ValueError('Counts must be positive')
-    dc=torch.load(a.diffusion_checkpoint,map_location='cpu',weights_only=False);vc=torch.load(a.vae_checkpoint,map_location='cpu',weights_only=False)
+    diffusion_sha=sha(a.diffusion_checkpoint);dc=torch.load(a.diffusion_checkpoint,map_location='cpu',weights_only=False)
+    if sha(a.diffusion_checkpoint)!=diffusion_sha:raise RuntimeError('Diffusion checkpoint changed while loading; use a fixed copy')
+    vh=sha(a.vae_checkpoint);vc=torch.load(a.vae_checkpoint,map_location='cpu',weights_only=False)
+    if sha(a.vae_checkpoint)!=vh:raise RuntimeError('VAE checkpoint changed while loading; use a fixed copy')
     if dc['split']!=split or any(sorted(vc['config'][k+'_ids'])!=sorted(split[k]) for k in split):raise ValueError('Split mismatch')
-    mh=sha(a.manifest);vh=sha(a.vae_checkpoint)
+    mh=sha(a.manifest)
     if dc['vae_sha256']!=vh or dc['manifest_sha256']!=mh or vc['config']['manifest_sha256']!=mh:raise ValueError('Checkpoint provenance mismatch')
     size=int(dc['config']['patch_size']);steps=int(dc['config']['timesteps'])
     if a.sample_steps>steps:raise ValueError('Sample steps exceed schedule')
@@ -104,7 +110,7 @@ def main():
         print(f'ID{alloy_id:02d} complete; elapsed {time.monotonic()-start:.1f}s',flush=True)
     for name,data in [('条件敏感度逐次.csv',rows),('配对图像误差.csv',summaries)]:
       with (out/name).open('w',encoding='utf-8-sig',newline='') as f:w=csv.DictWriter(f,fieldnames=data[0]);w.writeheader();w.writerows(data)
-    info={'arguments':vars(a),'split':split,'vae_sha256':vh,'diffusion_sha256':sha(a.diffusion_checkpoint),'manifest_sha256':mh,'diffusion_checkpoint_step':dc.get('step'),'elapsed_seconds':time.monotonic()-start,'crop':'center 256; nearest to model size, same as sample.py','interpretation':'RGB MAE is paired pixel difference, not crystallographic validity; condition delta is descriptive, not causation. ID19 and ID14 previously unblinded.'}
+    info={'arguments':vars(a),'split':split,'vae_sha256':vh,'diffusion_sha256':diffusion_sha,'manifest_sha256':mh,'diffusion_checkpoint_step':dc.get('step'),'diffusion_excluded_train_ids':dc.get('config',{}).get('exclude_train_ids',[]),'elapsed_seconds':time.monotonic()-start,'crop':'center 256; nearest to model size, same as sample.py','interpretation':'RGB MAE is paired pixel difference, not crystallographic validity; condition delta is descriptive, not causation. ID19 and ID14 previously unblinded.'}
     (out/'运行记录.json').write_text(json.dumps(info,ensure_ascii=False,indent=2),encoding='utf-8')
     print('Results:',out,flush=True)
 if __name__=='__main__':main()
