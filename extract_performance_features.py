@@ -8,7 +8,7 @@ from model import build_vae
 
 def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--checkpoint',required=True);p.add_argument('--manifest',default='data/manifest.json');p.add_argument('--split',default='data/split.json');p.add_argument('--output',required=True);p.add_argument('--windows',type=int,default=16);p.add_argument('--batch-windows',type=int,default=4);p.add_argument('--device',default='cuda');a=p.parse_args()
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--checkpoint',required=True);p.add_argument('--manifest',default='data/manifest.json');p.add_argument('--split',default='data/split.json');p.add_argument('--output',required=True);p.add_argument('--windows',type=int,default=16);p.add_argument('--batch-windows',type=int,default=4);p.add_argument('--device',default='cuda');p.add_argument('--partitions',nargs='+',choices=['train','val','test'],default=['train','val','test']);a=p.parse_args()
  if min(a.windows,a.batch_windows)<1:raise ValueError('Window counts must be positive')
  device=torch.device(a.device)
  if device.type=='cuda' and not torch.cuda.is_available():raise RuntimeError('CUDA unavailable; specify --device cpu')
@@ -20,7 +20,7 @@ def main():
  if out.exists():raise FileExistsError(f'{out} already exists; choose a new output file')
  out.parent.mkdir(parents=True,exist_ok=True)
  vae=build_vae().to(device);vae.load_state_dict(checkpoint['vae']);vae.eval();rows=[]
- for part in ('train','val','test'):
+ for part in a.partitions:
   ds=AlloyDataset(a.manifest,split[part],256,a.windows,'eval')
   for idx in range(len(ds)):
    record=ds.records[idx];image=Path(a.manifest).resolve().parent/record['image']
