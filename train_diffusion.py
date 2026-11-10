@@ -20,6 +20,8 @@ def parser():
  p=argparse.ArgumentParser(description=__doc__)
  p.add_argument('--manifest',required=True);p.add_argument('--split',required=True);p.add_argument('--vae-checkpoint',required=True);p.add_argument('--output',required=True)
  p.add_argument('--resume',help='Resume last.pt from the same output directory; appends metrics. DataLoader order is not bitwise restored.');p.add_argument('--patch-size',type=int,default=256);p.add_argument('--windows-per-alloy',type=int,default=4);p.add_argument('--batch-size',type=int,default=2,help='number of alloys, each with K windows')
+ p.add_argument('--exclude-train-ids',nargs='*',type=int,default=[],help='Exclude these original training IDs from diffusion only; VAE retains its original training history')
+ p.add_argument('--drop-last',action='store_true',help='Drop the last incomplete alloy batch to keep batch size fixed')
  p.add_argument('--grad-accum',type=int,default=1);p.add_argument('--steps',type=int,default=10000);p.add_argument('--lr',type=float,default=1e-4);p.add_argument('--timesteps',type=int,default=1000)
  p.add_argument('--pixel-loss',choices=['mse','l1'],default='mse');p.add_argument('--ssim-weight',type=float,default=0.0);p.add_argument('--edge-weight',type=float,default=0.0)
  p.add_argument('--train-flip',action='store_true',help='Apply random pixel flips before deriving the VAE condition')
@@ -94,6 +96,13 @@ def validate_splits(checkpoint,split):
   if ckey not in checkpoint.get('config',{}):raise ValueError(f'VAE checkpoint lacks config.{ckey}; cannot verify leakage')
   if sorted(map(int,checkpoint['config'][ckey]))!=sorted(map(int,split[key])):raise ValueError(f'VAE checkpoint {ckey} differs from current split')
 
+def select_diffusion_train_ids(split, excluded):
+ if len(excluded)!=len(set(excluded)):raise ValueError('Duplicate excluded training IDs')
+ if not set(excluded).issubset(set(split['train'])):raise ValueError('Excluded IDs must be in the original training split; validation/test must not be excluded')
+ selected=[i for i in split['train'] if i not in set(excluded)]
+ if not selected:raise ValueError('Cannot exclude all training alloys')
+ return selected
+
 def run():
  args=parser().parse_args();out=Path(args.output);out.mkdir(parents=True,exist_ok=True)
  if not args.resume and ((out/'metrics.csv').exists() or (out/'run_config.json').exists()): raise FileExistsError(f'{out} already contains a run; choose a new --output')
@@ -105,13 +114,13 @@ def run():
  random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
  if args.device.startswith('cuda') and not torch.cuda.is_available():raise RuntimeError('CUDA requested but unavailable; use --device cpu for smoke tests')
  device=torch.device(args.device);amp=args.amp if device.type=='cuda' else 'no';dtype=torch.bfloat16 if amp=='bf16' else torch.float16
- split=load_split(args.split);ck=torch.load(args.vae_checkpoint,map_location='cpu',weights_only=False);validate_splits(ck,split)
+ split=load_split(args.split);selected_train_ids=select_diffusion_train_ids(split,args.exclude_train_ids);ck=torch.load(args.vae_checkpoint,map_location='cpu',weights_only=False);validate_splits(ck,split)
  manifest_sha256=hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
  if ck['config'].get('manifest_sha256')!=manifest_sha256:raise ValueError('VAE checkpoint dataset manifest SHA256 does not match diffusion dataset; cannot validate data provenance')
  vae,source_patch=load_condition_vae(ck,device,args.patch_size)
- train=AlloyDataset(args.manifest,split['train'],patch_size=source_patch,windows_per_alloy=args.windows_per_alloy,mode='train',seed=args.seed,train_flip=args.train_flip,train_rotate=args.train_rotate)
+ train=AlloyDataset(args.manifest,selected_train_ids,patch_size=source_patch,windows_per_alloy=args.windows_per_alloy,mode='train',seed=args.seed,train_flip=args.train_flip,train_rotate=args.train_rotate)
  val=AlloyDataset(args.manifest,split['val'],patch_size=source_patch,windows_per_alloy=args.eval_windows,mode='eval',seed=args.seed)
- dl=DataLoader(train,batch_size=args.batch_size,shuffle=True,num_workers=args.workers,pin_memory=device.type=='cuda');vl=DataLoader(val,batch_size=1,shuffle=False,num_workers=args.workers)
+ dl=DataLoader(train,batch_size=args.batch_size,shuffle=True,num_workers=args.workers,pin_memory=device.type=='cuda',drop_last=args.drop_last);vl=DataLoader(val,batch_size=1,shuffle=False,num_workers=args.workers)
  if not len(dl) or not len(vl):raise ValueError('Train and validation loaders must be non-empty')
  # Refuse silently changed source images; manifest SHA alone does not protect image contents.
  for record in train.records+val.records:
@@ -128,6 +137,7 @@ def run():
   if previous.get('split')!=split:raise ValueError('Resume split mismatch')
   required=('patch_size','windows_per_alloy','batch_size','grad_accum','lr','timesteps','base_channels','workers','seed','eval_windows','amp','device')
   old=previous.get('config',{})
+  if sorted(old.get('exclude_train_ids',[]))!=sorted(args.exclude_train_ids) or old.get('drop_last',False)!=args.drop_last:raise ValueError('Resume exclusion or drop-last setting mismatch')
   for key in required:
    if old.get(key)!=getattr(args,key):raise ValueError(f'Resume configuration mismatch for {key}: {old.get(key)} vs {getattr(args,key)}')
   for key,default in (('train_flip',False),('train_rotate',False),('condition_corruption','none'),('corruption_prob',0.2),('pixel_loss','mse'),('ssim_weight',0.0),('edge_weight',0.0)):
@@ -143,7 +153,8 @@ def run():
   if device.type=='cuda' and previous.get('cuda_rng_state') is not None:torch.cuda.set_rng_state_all(previous['cuda_rng_state'])
   print(f'Resuming at step {step}; metrics append; DataLoader position is not restored bitwise.',flush=True)
  else:
-  (out/'run_config.json').write_text(json.dumps({**vars(args),'split':split,'vae_config':ck.get('config',{}),'vae_sha256':vae_sha256,'manifest_sha256':manifest_sha256},indent=2,ensure_ascii=False,default=str),encoding='utf-8')
+  (out/'run_config.json').write_text(json.dumps({**vars(args),'split':split,'diffusion_train_ids':selected_train_ids,'vae_config':ck.get('config',{}),'vae_sha256':vae_sha256,'manifest_sha256':manifest_sha256,'note':'Excluded IDs are omitted only from diffusion training; the frozen VAE may have seen them.'},indent=2,ensure_ascii=False,default=str),encoding='utf-8')
+ print(f'Diffusion training IDs: {selected_train_ids}; excluded: {sorted(args.exclude_train_ids)}; VAE retains its original training history.',flush=True)
  it=iter(dl);opt.zero_grad(set_to_none=True)
  def evaluate():
   unet.eval(); totals=[];gen=torch.Generator(device=device).manual_seed(args.seed+98765)

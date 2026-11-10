@@ -12,12 +12,20 @@ from vector_vae import VectorVAE
 from vector_vae_256 import VectorVAE256
 from train_diffusion import make_unet, load_condition_vae, resize_for_diffusion
 
+def sha(path):
+ h=hashlib.sha256()
+ with Path(path).open('rb') as f:
+  for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
+ return h.hexdigest()
+
 def save_image(t,path):
  arr=((t.detach().float().clamp(-1,1).cpu().permute(1,2,0).numpy()+1)*127.5).round().astype(np.uint8);Image.fromarray(arr).save(path)
 def run():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('--vae-checkpoint',required=True);p.add_argument('--diffusion-checkpoint',required=True);group=p.add_mutually_exclusive_group(required=True);group.add_argument('--reference',help='real image for reconstruction/refinement');group.add_argument('--latent',help='external latent tensor .pt');p.add_argument('--output',required=True);p.add_argument('--sample-steps',type=int,default=50);p.add_argument('--count',type=int,default=4);p.add_argument('--seed',type=int,default=42);p.add_argument('--device',default='cuda');args=p.parse_args();device=torch.device(args.device)
  if device.type=='cuda' and not torch.cuda.is_available():raise RuntimeError('CUDA unavailable; use --device cpu for smoke test')
- ck=torch.load(args.diffusion_checkpoint,map_location='cpu',weights_only=False);vc=torch.load(args.vae_checkpoint,map_location='cpu',weights_only=False)
+ diffusion_hash=sha(args.diffusion_checkpoint);ck=torch.load(args.diffusion_checkpoint,map_location='cpu',weights_only=False)
+ if sha(args.diffusion_checkpoint)!=diffusion_hash:raise RuntimeError('Diffusion checkpoint changed while loading; use a fixed copy')
+ vc=torch.load(args.vae_checkpoint,map_location='cpu',weights_only=False)
  for k in ['train','val','test']:
   if sorted(map(int,vc['config'][k+'_ids']))!=sorted(map(int,ck['split'][k])):raise ValueError('VAE split mismatch')
  actual_hash=hashlib.sha256(Path(args.vae_checkpoint).read_bytes()).hexdigest()
@@ -41,5 +49,6 @@ def run():
    for t in sched.timesteps:
     pred=unet(torch.cat([image,coarse],1),t).sample;image=sched.step(pred,t,image,eta=0).prev_sample
    save_image(image[0],out/f'refined_{i:03d}.png');print(f'Generated {i+1}/{args.count}',flush=True)
- (out/'sample_config.json').write_text(json.dumps(vars(args),indent=2,ensure_ascii=False),encoding='utf-8')
+ metadata={**vars(args),'diffusion_checkpoint_step':ck.get('step'),'diffusion_checkpoint_sha256':diffusion_hash,'vae_checkpoint_sha256':actual_hash,'diffusion_excluded_train_ids':ck.get('config',{}).get('exclude_train_ids',[])}
+ (out/'sample_config.json').write_text(json.dumps(metadata,indent=2,ensure_ascii=False),encoding='utf-8')
 if __name__=='__main__':run()
